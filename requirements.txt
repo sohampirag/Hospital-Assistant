@@ -1,0 +1,12 @@
+pipecat-ai
+pipecat-ai[webrtc]
+sarvamai
+fastapi
+uvicorn
+psycopg
+psycopg-binary
+pgvector
+python-dotenv
+google-genai
+openai
+groq

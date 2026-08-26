@@ -266,3 +266,33 @@ def cancel_appointment(appointment_id):
             return True
         return False
 
+
+def verify_appointment_booked(app_id):
+    """Returns True only if the appointment exists in DB with status='booked'."""
+    conn = get_connection()
+    with conn.cursor() as cur:
+        cur.execute("SELECT status FROM appointments WHERE id = %s", (app_id,))
+        row = cur.fetchone()
+        return row is not None and row[0] == 'booked'
+
+
+def verify_appointment_cancelled(app_id):
+    """Returns True only if the appointment exists in DB with status='cancelled'."""
+    conn = get_connection()
+    with conn.cursor() as cur:
+        cur.execute("SELECT status FROM appointments WHERE id = %s", (app_id,))
+        row = cur.fetchone()
+        return row is not None and row[0] == 'cancelled'
+
+
+def get_hospital_address(hospital_name):
+    """Returns (name, address) for a hospital matched by name."""
+    conn = get_connection()
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT name, address FROM hospital WHERE name ILIKE %s",
+            (f"%{hospital_name}%",)
+        )
+        return cur.fetchone()
+
+

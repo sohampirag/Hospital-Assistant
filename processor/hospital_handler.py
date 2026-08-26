@@ -1,4 +1,16 @@
-import json
+"""
+hospital_handler.py  –  Jeevan Mishra Hospital Assistant
+
+Architecture:
+  - One HospitalHandler instance per session (per call). State is NOT shared.
+  - LLM extracts intent + entities (structured JSON).
+  - This handler merges entities, resolves DB facts, validates, and produces
+    a deterministic response. No hallucinations.
+"""
+
+import re
+import difflib
+
 from processor.hospital_db import (
     get_hospitals,
     get_doctors,
@@ -9,339 +21,544 @@ from processor.hospital_db import (
     create_appointment,
     get_appointment_for_cancellation,
     cancel_appointment,
-    get_patient_appointments
+    get_patient_appointments,
+    verify_appointment_booked,
+    verify_appointment_cancelled,
+    get_hospital_address,
 )
 
+# ---------------------------------------------------------------------------
+# Hospital name normalizer – deterministic, no LLM
+# ---------------------------------------------------------------------------
+_HOSPITAL_ALIASES = {
+    "apollo": "Apollo Hospitals Indore",
+    "shukla": "Shukla Hospital",
+    "bombay": "Bombay Hospital Indore",
+    "choithram": "Choithram Hospital & Research Centre",
+    "chaitram": "Choithram Hospital & Research Centre",
+    "chotram": "Choithram Hospital & Research Centre",
+    "choitharam": "Choithram Hospital & Research Centre",
+}
+
+def _normalize_hospital(raw: str) -> str | None:
+    if not raw:
+        return None
+    lower = raw.lower()
+    for alias, canonical in _HOSPITAL_ALIASES.items():
+        if alias in lower:
+            return canonical
+    return None
+
+
+# ---------------------------------------------------------------------------
+# Doctor name resolver – safe (only when appropriate)
+# ---------------------------------------------------------------------------
+def _resolve_doctor(name_hint: str, hospital_filter: str | None = None) -> tuple | None:
+    if not name_hint:
+        return None
+
+    clean = re.sub(r'^(dr\.?|doctor)\s+', '', name_hint.strip(), flags=re.I).strip()
+
+    # 1. Direct DB lookup (ILIKE)
+    doc = get_doctor_by_name(clean) or get_doctor_by_name(name_hint.strip())
+    if doc:
+        if hospital_filter and hospital_filter.lower() not in doc[5].lower():
+            return None
+        return doc
+
+    # 2. Fuzzy match
+    if hospital_filter:
+        candidates = get_doctors_by_hospital(hospital_filter)
+        cand_names = [r[0] for r in candidates]
+    else:
+        all_docs = get_doctors()
+        cand_names = [r[0] for r in all_docs]
+
+    if not cand_names:
+        return None
+
+    cand_lower = {c.lower(): c for c in cand_names}
+    matches = difflib.get_close_matches(clean.lower(), cand_lower.keys(), n=1, cutoff=0.55)
+    if matches:
+        resolved = cand_lower[matches[0]]
+        return get_doctor_by_name(resolved)
+
+    return None
+
+
+def _fmt_doc(doc_row) -> str:
+    name = doc_row[1]
+    return name if str(name).startswith("Dr") else f"Dr. {name}"
+
+
+# ---------------------------------------------------------------------------
+# Main handler – one instance per session
+# ---------------------------------------------------------------------------
 class HospitalHandler:
     def __init__(self):
-        self.current_flow = None
-        # We store booking state locally instead of relying on the LLM history.
-        self.state = {
-            "hospital_name": None,
-            "doctor_name": None,
-            "appointment_date": None,
-            "appointment_time": None,
-            "patient_name": None,
-            "phone": None,
-            "address": None
-        }
+        self.hospital_name: str | None = None
+        self.doctor_name: str | None = None
+        self.doctor_row: tuple | None = None
+        self.specialization: str | None = None
+        self.appointment_date: str | None = None
+        self.appointment_time: str | None = None
+        self.patient_name: str | None = None
+        self.phone: str | None = None
+        self.address: str | None = None
+        
+        self.current_intent: str | None = None
+        self.confirmation_pending: bool = False
+        
+        self.cancel_appointments: list = []
+        self.cancel_idx: int = 0
 
     def process_intent(self, intent_data: dict, user_text: str = "") -> str:
-        intent = intent_data.get("intent", "unknown")
-        
-        if self.current_flow == "cancel_appointment":
-            if intent not in ["greeting", "farewell"]:
-                intent = "cancel_appointment"
-        elif self.current_flow == "book_appointment":
-            if intent == "cancel_appointment":
-                self._reset_state()
-                self.current_flow = "cancel_appointment"
-            elif intent in ["greeting", "farewell", "check_hospital", "check_fee"]:
-                pass  # allow these through even during booking
-            else:
-                intent = "book_appointment"
-        elif self.current_flow == "check_appointment":
-            if intent not in ["greeting", "farewell"]:
-                intent = "check_appointment"
-        elif self.current_flow == "check_availability":
-            # User is selecting a doctor from the listed doctors
-            if intent not in ["greeting", "farewell"]:
-                intent = "list_doctors"
-                
-        if not self.current_flow:
-            if intent in ["book_appointment", "cancel_appointment", "check_appointment"]:
-                self.current_flow = intent
-            
-        # Update local state with any extracted entities
-        for key in ["doctor_name", "hospital_name", "appointment_date", "appointment_time", "patient_name", "phone", "address"]:
-            val = intent_data.get(key)
-            if val:
-                val_str = str(val).strip().lower()
-                if val_str not in ["none", "null", "n/a", "unknown", "not mentioned", ""]:
-                    if key == "phone":
-                        import re
-                        cleaned = re.sub(r'\D', '', str(val))
-                        if cleaned:
-                            self.state[key] = cleaned
-                    else:
-                        self.state[key] = str(val).strip()
-                    
-        # Fallback: if LLM lumps time into the date string
-        if self.state["appointment_date"] and not self.state["appointment_time"]:
-            import re
-            time_match = re.search(r'\b(\d{1,2})(?::(\d{2}))?\s*(AM|PM|am|pm)\b', self.state["appointment_date"])
-            if time_match:
-                self.state["appointment_time"] = time_match.group(0)
-                    
-        # Fallback: if we are at the address step, use raw text if LLM failed to extract it
-        if self.current_flow == "book_appointment" and self.state["phone"] and not self.state["address"]:
-            # Make sure we didn't JUST extract the phone number in this very turn
-            if user_text and intent != "greeting" and not intent_data.get("phone"):
-                self.state["address"] = user_text
-                
-        # Normalize hospital names to handle STT variations (like Chaitram -> Choithram)
-        if self.state["hospital_name"]:
-            hn = self.state["hospital_name"].lower()
-            if "choithram" in hn or "chaitram" in hn or "chotram" in hn:
-                self.state["hospital_name"] = "Choithram Hospital & Research Centre"
-            elif "apollo" in hn:
-                self.state["hospital_name"] = "Apollo Hospitals Indore"
-            elif "shukla" in hn:
-                self.state["hospital_name"] = "Shukla Hospital"
-            elif "bombay" in hn:
-                self.state["hospital_name"] = "Bombay Hospital Indore"
-                
-        # Normalize doctor names using fuzzy matching
-        import difflib
-        import re as _re
-        if self.state["doctor_name"]:
-            docs = get_doctors()
-            if docs:
-                doc_names = [d[0] for d in docs]
-                doc_names_lower = {d.lower(): d for d in doc_names}
-                matches = difflib.get_close_matches(self.state["doctor_name"].lower(), doc_names_lower.keys(), n=1, cutoff=0.5)
-                if matches:
-                    self.state["doctor_name"] = doc_names_lower[matches[0]]
-                else:
-                    # No fuzzy match - clear bad name so raw text fallback can try
-                    self.state["doctor_name"] = None
+        intent = intent_data.get("intent", "unrelated")
 
-        # Raw text fallback: if still no doctor name, try matching the full user utterance
-        if not self.state["doctor_name"] and user_text and self.current_flow == "check_availability":
-            docs = get_doctors()
-            if docs:
-                doc_names = [d[0] for d in docs]
-                doc_names_lower = {d.lower(): d for d in doc_names}
-                # Strip common prefixes like 'doctor', 'dr.', 'okay', etc.
-                clean_text = _re.sub(r'^(okay|ok|yes|doctor|dr\.?)\s+', '', user_text.lower().strip())
-                matches = difflib.get_close_matches(clean_text, doc_names_lower.keys(), n=1, cutoff=0.5)
-                if matches:
-                    self.state["doctor_name"] = doc_names_lower[matches[0]]
-                    intent = "list_doctors"  # force intent regardless of LLM output
-                
-        # Fallback: if we are asking for a doctor, and the LLM misclassified the name as patient_name
-        if self.current_flow == "book_appointment" and not self.state["doctor_name"] and self.state["patient_name"]:
-            # Check if this name matches a doctor
-            doc = get_doctor_by_name(self.state["patient_name"])
-            if doc:
-                self.state["doctor_name"] = self.state["patient_name"]
-                self.state["patient_name"] = None
+        if self.confirmation_pending:
+            return self._handle_confirmation(intent_data, user_text)
 
+        self._merge_entities(intent_data)
+
+        # Fallback for LLM JSON failures or complete misclassifications during data collection
+        if self.current_intent == "book_appointment":
+            if intent in ("unrelated", "unknown") and not any(intent_data.get(k) for k in ["patient_name", "phone", "address", "hospital_name", "doctor_name", "appointment_date", "appointment_time"]):
+                if self.hospital_name and self.doctor_name and self.appointment_date and self.appointment_time:
+                    text_clean = user_text.strip()
+                    if text_clean:
+                        if not self.patient_name:
+                            self.patient_name = text_clean
+                            intent = "book_appointment"
+                        elif not self.phone:
+                            digits = re.sub(r"\D", "", text_clean)
+                            if len(digits) >= 10:
+                                self.phone = digits
+                                intent = "book_appointment"
+                        elif not self.address:
+                            self.address = text_clean
+                            intent = "book_appointment"
+
+        # Robust intent override: if we are in a booking flow and the LLM misclassified a single-entity response
+        if self.current_intent == "book_appointment":
+            if intent in ("unrelated", "unknown", "hospital_information", "doctor_information", "fee_information", "schedule_information"):
+                # If they provided ANY useful booking entity in this turn, force book_appointment
+                if any(intent_data.get(k) for k in ["patient_name", "phone", "address", "hospital_name", "doctor_name", "appointment_date", "appointment_time"]):
+                    intent = "book_appointment"
+
+        # Logging to verify router
+        print(f"[ROUTER] intent={intent}")
+        print(f"[ROUTER] entities={intent_data}")
+        print(f"[STATE] after={self.state}")
+
+        # Exact ONE router based on explicit intent
         if intent == "farewell":
-            self._reset_state()
+            self._reset()
             return "Thank you for calling, have a great day and stay healthy, goodbye!"
-
+            
         if intent == "greeting":
-            if self.current_flow == "book_appointment":
-                return "Hello! " + self._handle_booking_flow()
-            elif self.current_flow == "cancel_appointment":
-                return "Hello! " + self._handle_cancel_flow()
-            else:
-                self._reset_state()
-                return "Hello! I am Jeevan Mishra, your hospital assistant. How can I help you today?"
+            if self.current_intent:
+                return self._resume_flow()
+            self._reset()
+            return ("Hello! I am Jeevan Mishra, your hospital assistant. "
+                    "I can help you with hospital information, doctor availability, "
+                    "and appointment booking. How can I help you today?")
+                    
+        if intent == "list_hospitals":
+            return self._handle_list_hospitals()
+            
+        if intent == "list_doctors":
+            return self._handle_list_doctors(intent_data)
+            
+        if intent == "check_specialization" or intent == "specialization_information":
+            return self._handle_check_specialization(intent_data)
+            
+        if intent in ("check_fee", "fee_information", "check_schedule", "schedule_information", "check_hospital", "hospital_information", "doctor_information"):
+            return self._handle_info_query(intent)
 
-        elif intent == "list_hospitals":
-            hospitals = get_hospitals()
-            if not hospitals:
-                return "I'm sorry, I couldn't find any hospitals in our database right now."
-            names = [h[0] for h in hospitals]
-            return f"We have the following hospitals available: {', '.join(names)}."
+        if intent == "check_availability":
+            return self._handle_check_availability()
+            
+        if intent == "book_appointment":
+            self.current_intent = "book_appointment"
+            return self._handle_booking()
+            
+        if intent == "cancel_appointment":
+            self.current_intent = "cancel_appointment"
+            return self._handle_cancel()
+            
+        if intent == "cancel_booking_process":
+            self._reset()
+            return "Booking process cancelled. How else can I help you?"
 
-        elif intent == "list_doctors":
-            # If user picked a specific doctor (from check_availability flow or direct mention)
-            if self.state["doctor_name"]:
-                doc = get_doctor_by_name(self.state["doctor_name"])
+        if intent == "check_appointment":
+            self.current_intent = "check_appointment"
+            return self._handle_check_appointment()
+
+        # Fallback for unrelated
+        return ("I can help with hospital information and appointments. "
+                "What would you like to know?")
+
+    def _merge_entities(self, d: dict):
+        extracted_patient = None
+        raw_p = d.get("patient_name")
+        if raw_p and str(raw_p).lower() not in ("none", "null", ""):
+            extracted_patient = str(raw_p).strip()
+
+        # ── Doctor resolution ────────────────────────────────────────────────
+        # Must resolve doctor FIRST. The LLM often puts bare doctor names into
+        # patient_name when no "Dr." prefix is present.
+        if not self.doctor_name:
+            raw_d = d.get("doctor_name")
+            explicit_doc = raw_d if (raw_d and str(raw_d).lower() not in ("none", "null", "")) else None
+
+            # Build an ordered list of candidates to try for doctor resolution
+            candidates_to_try = []
+            if explicit_doc:
+                candidates_to_try.append(explicit_doc)
+            # Before date/time is known, any name (from patient_name field or previous state) may be a doctor
+            if not (self.appointment_date and self.appointment_time):
+                if extracted_patient and extracted_patient not in candidates_to_try:
+                    candidates_to_try.append(extracted_patient)
+                if self.patient_name and self.patient_name not in candidates_to_try:
+                    candidates_to_try.append(self.patient_name)
+
+            for candidate in candidates_to_try:
+                doc = _resolve_doctor(candidate, self.hospital_name)
                 if doc:
-                    # doc: id, name, specialization, fee, schedule, hospital_name
-                    doc_display = doc[1] if str(doc[1]).startswith("Dr") else f"Dr. {doc[1]}"
-                    self.current_flow = "book_appointment"
-                    self.state["hospital_name"] = doc[5]
-                    return f"{doc_display} specializes in {doc[2]} and is available at {doc[5]}, their fee is rupees {doc[3]} and schedule is {doc[4]}, would you like to book an appointment?"
+                    self.doctor_row = doc
+                    self.doctor_name = doc[1]
+                    if not self.hospital_name:
+                        self.hospital_name = doc[5]
+                    self.specialization = doc[2]
+                    # If the candidate came from patient_name state, clear it (it was misclassified)
+                    if self.patient_name == candidate:
+                        self.patient_name = None
+                    if extracted_patient == candidate:
+                        extracted_patient = None
+                    break  # Stop once we have a valid doctor
+
+        # Only store as patient_name if the value is NOT a doctor
+        if not self.patient_name and extracted_patient:
+            if not _resolve_doctor(extracted_patient, self.hospital_name):
+                self.patient_name = extracted_patient
+
+        # Phone
+        if not self.phone:
+            raw_ph = d.get("phone")
+            if raw_ph:
+                digits = re.sub(r"\D", "", str(raw_ph))
+                if digits:
+                    self.phone = digits
+
+        # Address
+        if not self.address:
+            raw_a = d.get("address")
+            if raw_a and str(raw_a).lower() not in ("none", "null", ""):
+                self.address = str(raw_a).strip()
+
+        # Hospital
+        if not self.hospital_name:
+            raw_h = d.get("hospital_name")
+            if raw_h:
+                resolved = _normalize_hospital(raw_h)
+                if resolved:
+                    self.hospital_name = resolved
+
+        # Specialization
+        if not self.specialization:
+            raw_s = d.get("specialization")
+            if raw_s:
+                self.specialization = str(raw_s).strip()
+
+        # Date/Time
+        if not self.appointment_date:
+            raw_date = d.get("appointment_date")
+            if raw_date and str(raw_date).lower() not in ("none", "null", ""):
+                time_in_date = re.search(
+                    r'\b(\d{1,2})(?::(\d{2}))?\s*(AM|PM|am|pm)\b',
+                    str(raw_date)
+                )
+                if time_in_date:
+                    if not self.appointment_time:
+                        self.appointment_time = time_in_date.group(0)
+                    self.appointment_date = str(raw_date)[:time_in_date.start()].strip()
                 else:
-                    # Doctor name not found, list again
-                    self.state["doctor_name"] = None
-            # Otherwise list all doctors and enter check_availability flow
-            hospital_name = intent_data.get("hospital_name")
-            if hospital_name:
-                doctors = get_doctors_by_hospital(hospital_name)
-                if not doctors:
-                    return f"I couldn't find any doctors at {hospital_name}."
-                doc_list = [f"{d[0] if str(d[0]).startswith('Dr') else 'Dr. ' + str(d[0])} ({d[1]})" for d in doctors]
-                self.current_flow = "check_availability"
-                return f"At {hospital_name}, we have: {', '.join(doc_list)}, which doctor would you like to know about?"
-            else:
-                doctors = get_doctors()
-                if not doctors:
-                    return "I couldn't find any doctors."
-                doc_list = [f"{d[0] if str(d[0]).startswith('Dr') else 'Dr. ' + str(d[0])}" for d in doctors]
-                self.current_flow = "check_availability"
-                return f"We have the following doctors: {', '.join(doc_list)}, which doctor would you like to know about?"
+                    self.appointment_date = str(raw_date).strip()
 
-        elif intent == "check_fee":
-            doc_name = self.state.get("doctor_name")
-            if not doc_name:
-                return "Could you please tell me which doctor's fee you want to know?"
-            doc = get_doctor_by_name(doc_name)
-            if not doc:
-                return f"I couldn't find Dr. {doc_name}, could you verify the name?"
-            # doc tuple: id, name, specialization, fee, schedule, hospital_name
-            doc_display = doc[1] if str(doc[1]).startswith("Dr") else f"Dr. {doc[1]}"
-            return f"{doc_display} is available at {doc[5]}, charges rupees {doc[3]}, and their schedule is {doc[4]}."
+        if not self.appointment_time:
+            raw_time = d.get("appointment_time")
+            if raw_time and str(raw_time).lower() not in ("none", "null", ""):
+                self.appointment_time = str(raw_time).strip()
 
-        elif intent == "check_hospital":
-            doc_name = self.state.get("doctor_name")
-            if not doc_name:
-                return "Could you please tell me which doctor you are asking about?"
-            doc = get_doctor_by_name(doc_name)
-            if not doc:
-                return f"I couldn't find that doctor, could you verify the name?"
-            doc_display = doc[1] if str(doc[1]).startswith("Dr") else f"Dr. {doc[1]}"
-            return f"{doc_display} specializes in {doc[2]} and is available at {doc[5]}, would you like to book an appointment?"
+    def _looks_like_patient_context(self, d: dict) -> bool:
+        p = d.get("patient_name")
+        return bool(p and str(p).lower() not in ("none", "null", ""))
 
-        elif intent == "book_appointment":
-            return self._handle_booking_flow()
 
-        elif intent == "cancel_appointment":
-            return self._handle_cancel_flow()
-            
-        elif intent == "check_appointment":
-            return self._handle_check_flow()
+    # ── Information handlers ─────────────────────────────────────────────────
+    def _handle_list_hospitals(self) -> str:
+        rows = get_hospitals()
+        if not rows:
+            return "I'm sorry, I couldn't find any hospitals in our system right now."
+        names = [r[0] for r in rows]
+        return f"We have {len(names)} hospitals: {', '.join(names)}."
 
-        else:
-            return "I'm sorry, I didn't quite catch that, would you like to book an appointment or check a doctor's availability?"
+    def _handle_list_doctors(self, d: dict) -> str:
+        hospital = self.hospital_name
+        if not hospital:
+            raw_h = d.get("hospital_name")
+            if raw_h:
+                hospital = _normalize_hospital(raw_h)
+        if hospital:
+            rows = get_doctors_by_hospital(hospital)
+            if not rows:
+                return f"I couldn't find any doctors at {hospital}."
+            doc_list = [
+                f"{r[0] if str(r[0]).startswith('Dr') else 'Dr. ' + r[0]} ({r[1]})"
+                for r in rows
+            ]
+            return f"At {hospital} we have: {', '.join(doc_list)}."
+        
+        rows = get_doctors()
+        if not rows:
+            return "I couldn't find any doctors in our system."
+        doc_list = [
+            f"{r[0] if str(r[0]).startswith('Dr') else 'Dr. ' + r[0]} ({r[1]})"
+            for r in rows
+        ]
+        return f"We have the following doctors: {', '.join(doc_list)}."
 
-    def _handle_booking_flow(self) -> str:
-        # If we already know the doctor, look up their hospital automatically
-        if self.state["doctor_name"] and not self.state["hospital_name"]:
-            doc_lookup = get_doctor_by_name(self.state["doctor_name"])
-            if doc_lookup:
-                self.state["hospital_name"] = doc_lookup[5]
+    def _handle_check_specialization(self, d: dict) -> str:
+        spec = self.specialization or d.get("specialization")
+        if not spec:
+            return "Which specialization are you interested in?"
+        rows = get_doctors_by_specialization(spec, self.hospital_name)
+        if not rows:
+            return f"I couldn't find any {spec} doctors in our system."
+        doc_list = [
+            f"{r[0] if str(r[0]).startswith('Dr') else 'Dr. ' + r[0]} at {r[3]}"
+            for r in rows
+        ]
+        return f"For {spec} we have: {', '.join(doc_list)}."
 
-        # Step 1: Need Hospital
-        if not self.state["hospital_name"]:
-            hospitals = get_hospitals()
-            names = [h[0] for h in hospitals] if hospitals else []
-            return f"Which hospital would you prefer? Available options are: {', '.join(names)}."
-            
-        # Step 2: Need Doctor
-        if not self.state["doctor_name"]:
-            doctors = get_doctors_by_hospital(self.state["hospital_name"])
-            if not doctors:
-                return f"I couldn't find any doctors at {self.state['hospital_name']}."
-            doc_list = [f"{d[0] if str(d[0]).startswith('Dr') else 'Dr. ' + str(d[0])} ({d[1]})" for d in doctors]
-            return f"At {self.state['hospital_name']}, we have: {', '.join(doc_list)}, which doctor would you like to see?"
-            
-        doc = get_doctor_by_name(self.state["doctor_name"])
+    def _handle_info_query(self, intent: str) -> str:
+        if not self.doctor_row and self.doctor_name:
+            self.doctor_row = get_doctor_by_name(self.doctor_name)
+        doc = self.doctor_row
         if not doc:
-            self.state["doctor_name"] = None
-            return "I couldn't find that doctor, which doctor did you mean?"
-        
-        self.state["doctor_name"] = doc[1]
-        # Also ensure hospital is always populated from DB
-        if not self.state["hospital_name"]:
-            self.state["hospital_name"] = doc[5]
+            return "Which doctor would you like information about?"
+        display = _fmt_doc(doc)
+        if intent in ("check_fee", "fee_information"):
+            return f"{display} charges rupees {doc[3]}."
+        if intent in ("check_schedule", "schedule_information"):
+            return f"{display} is available {doc[4]}."
+        if intent in ("check_hospital", "hospital_information", "doctor_information"):
+            return f"{display} specializes in {doc[2]} and works at {doc[5]}."
+        return ""
 
-        # Step 3: Tell Slot/Fee and ask Date/Time
-        doc_display = doc[1] if str(doc[1]).startswith("Dr") else f"Dr. {doc[1]}"
-        if not self.state["appointment_date"] or not self.state["appointment_time"]:
-            return f"{doc_display} charges ₹{doc[3]} and their schedule is {doc[4]}. What date and time would you like to book?"
+    def _handle_check_availability(self) -> str:
+        if not self.doctor_name:
+            return "For which doctor?"
+        if not self.appointment_date or not self.appointment_time:
+            return "What date and time?"
+        available = check_slot_available(self.doctor_name, self.appointment_date, self.appointment_time)
+        return "That slot is available." if available else "I'm sorry, that slot is not available."
 
-        # Verify availability
-        is_available = check_slot_available(
-            self.state["doctor_name"],
-            self.state["appointment_date"],
-            self.state["appointment_time"]
+    # ── Booking flow ─────────────────────────────────────────────────────────
+    def _handle_booking(self) -> str:
+        if not self.hospital_name and not self.doctor_name:
+            rows = get_hospitals()
+            names = [r[0] for r in rows] if rows else []
+            if names:
+                return f"Which hospital would you prefer? Available options are: {', '.join(names)}."
+            return "Which hospital would you prefer?"
+
+        if not self.doctor_name:
+            if self.hospital_name:
+                rows = get_doctors_by_hospital(self.hospital_name)
+                if rows:
+                    doc_list = [f"{r[0] if str(r[0]).startswith('Dr') else 'Dr. ' + r[0]} ({r[1]})" for r in rows]
+                    return f"At {self.hospital_name} we have: {', '.join(doc_list)}. Which doctor would you like to see?"
+            return "Which doctor would you like to see?"
+
+        if not self.doctor_row:
+            self.doctor_row = get_doctor_by_name(self.doctor_name)
+        if not self.doctor_row:
+            return "Could you tell me the doctor's name again?"
+
+        doc = self.doctor_row
+        display = _fmt_doc(doc)
+        if not self.hospital_name:
+            self.hospital_name = doc[5]
+
+        if not self.appointment_date or not self.appointment_time:
+            return (f"{display} specializes in {doc[2]} at {self.hospital_name}. "
+                    f"The consultation fee is rupees {doc[3]} and they are available {doc[4]}. "
+                    "What date and time would you like to book?")
+
+        # All core booking info present, check availability
+        available = check_slot_available(
+            self.doctor_name,
+            self.appointment_date,
+            self.appointment_time,
         )
-        if not is_available:
-            self.state["appointment_date"] = None
-            self.state["appointment_time"] = None
-            return f"I'm sorry, {doc_display} is not available at that time. What other time works for you?"
+        if not available:
+            self.appointment_date = None
+            self.appointment_time = None
+            return f"I'm sorry, {display} is not available at that time. What other date or time works for you?"
 
-        # Step 4: Patient Name
-        if not self.state["patient_name"]:
-            return "Great, that slot is available! Could you please tell me your full name?"
+        # Slot is available, collect missing patient info
+        if not self.patient_name:
+            return "That slot is available! Please provide your full name."
 
-        # Step 5: Phone
-        if not self.state["phone"]:
-            return f"Thanks, {self.state['patient_name']}. What is your ten-digit mobile number?"
-        elif len(str(self.state["phone"]).replace(" ", "")) != 10 or not str(self.state["phone"]).replace(" ", "").isdigit():
-            self.state["phone"] = None
-            return "Please provide a valid ten-digit mobile number."
+        if not self.phone:
+            return f"Thanks {self.patient_name}. What is your ten digit mobile number?"
+        if len(self.phone) != 10 or not self.phone.isdigit():
+            self.phone = None
+            return "Please provide a valid ten digit mobile number."
 
-        # Step 6: Address
-        if not self.state["address"]:
-            return "Got it. Finally, could you share your address?"
+        if not self.address:
+            return "Got it. Finally, what is your address?"
 
-        # Step 7: Execute booking
+        # All fields present – show summary and ask confirmation
+        from processor.hospital_db import normalize_date, normalize_time
+        fmt_date = normalize_date(self.appointment_date) or self.appointment_date
+        fmt_time = normalize_time(self.appointment_time) or self.appointment_time
+        self.confirmation_pending = True
+        return (
+            f"Please confirm your booking: "
+            f"{display} at {self.hospital_name}, "
+            f"on {fmt_date} at {fmt_time}, "
+            f"fee rupees {doc[3]}, "
+            f"patient {self.patient_name}, "
+            f"number ending {self.phone[-4:]}. "
+            "Shall I confirm this booking? Say yes or no."
+        )
+
+    def _handle_confirmation(self, intent_data: dict, user_text: str) -> str:
+        confirm = intent_data.get("confirmation")
+        text_lower = user_text.lower().strip()
+
+        if confirm is None:
+            if any(w in text_lower for w in ("yes", "yeah", "confirm", "ok", "haan", "ha", "bilkul")):
+                confirm = "yes"
+            elif any(w in text_lower for w in ("no", "nahi", "nope", "cancel", "nahin")):
+                confirm = "no"
+
+        if confirm == "yes":
+            self.confirmation_pending = False
+            return self._execute_booking()
+
+        if confirm == "no":
+            self.confirmation_pending = False
+            self._reset()
+            return "No problem, I've cancelled the booking request. How else can I help you?"
+
+        return "Sorry, I didn't catch that. Please say yes to confirm or no to cancel."
+
+    def _execute_booking(self) -> str:
         app_id = create_appointment(
-            self.state["patient_name"],
-            self.state["phone"],
-            self.state["address"],
-            self.state["doctor_name"],
-            self.state["appointment_date"],
-            self.state["appointment_time"]
+            self.patient_name,
+            self.phone,
+            self.address,
+            self.doctor_name,
+            self.appointment_date,
+            self.appointment_time,
         )
+        if app_id and verify_appointment_booked(app_id):
+            booking_id = app_id
+            self._reset()
+            return (f"Your appointment is confirmed! "
+                    f"Your booking ID is {booking_id}. "
+                    "Is there anything else I can help you with?")
+        self._reset()
+        return ("I'm sorry, there was a problem completing your booking. "
+                "Please try again or call the hospital directly.")
 
-        if app_id:
-            self._reset_state()
-            return f"Your appointment is confirmed, your booking ID is {app_id}, is there anything else I can help you with?"
-        else:
-            return "I'm sorry, there was a problem booking your appointment, please try again."
-
-    def _handle_cancel_flow(self) -> str:
-        # Step 1: Need Patient Name
-        if not self.state["patient_name"]:
+    # ── Cancellation flow ────────────────────────────────────────────────────
+    def _handle_cancel(self) -> str:
+        if not self.patient_name:
             return "Sure, I can help with that. May I have your full name?"
+        if not self.phone:
+            return "And what is your ten digit mobile number?"
+        if len(self.phone) != 10 or not self.phone.isdigit():
+            self.phone = None
+            return "Please provide a valid ten digit mobile number."
 
-        # Step 2: Need Phone
-        if not self.state["phone"]:
-            return "And what is your ten-digit mobile number?"
-        elif len(str(self.state["phone"]).replace(" ", "")) != 10 or not str(self.state["phone"]).replace(" ", "").isdigit():
-            self.state["phone"] = None
-            return "Please provide a valid ten-digit mobile number."
-
-        # Both provided, check DB
-        apps = get_appointment_for_cancellation(self.state["patient_name"], self.state["phone"])
-        
+        apps = get_appointment_for_cancellation(self.patient_name, self.phone)
         if not apps:
-            self._reset_state()
-            return "I couldn't find any active appointment booked under that name and mobile number. You have not booked an appointment."
+            self._reset()
+            return ("I couldn't find any active appointments booked under that name "
+                    "and mobile number.")
 
-        # Cancel the first active appointment found
+        if len(apps) > 1:
+            self.cancel_appointments = apps
+            lines = []
+            for i, a in enumerate(apps, 1):
+                lines.append(f"{i}. {a[1]} on {a[2]} at {a[3]}")
+            self._reset()
+            return ("I found multiple appointments: " + "; ".join(lines) +
+                    ". Please call us directly to cancel a specific one.")
+
         app_id = apps[0][0]
         success = cancel_appointment(app_id)
         
-        self._reset_state()
-        
-        if success:
+        # Verify the DB actually reports cancelled
+        if success and verify_appointment_cancelled(app_id):
+            self._reset()
             return "Your appointment has been successfully cancelled."
-        else:
-            return "I'm sorry, there was an issue cancelling your appointment. Please try again later."
             
-    def _handle_check_flow(self) -> str:
-        # Step 1: Need Patient Name
-        if not self.state["patient_name"]:
-            return "Sure, I can check your appointment status. May I have your full name?"
+        self._reset()
+        return "I'm sorry, there was a problem cancelling your appointment. Please try again."
 
-        # Step 2: Need Phone
-        if not self.state["phone"]:
-            return "And what is your ten-digit mobile number?"
-        elif len(str(self.state["phone"]).replace(" ", "")) != 10 or not str(self.state["phone"]).replace(" ", "").isdigit():
-            self.state["phone"] = None
-            return "Please provide a valid ten-digit mobile number."
+    # ── Check appointment ─────────────────────────────────────────────────────
+    def _handle_check_appointment(self) -> str:
+        if not self.patient_name:
+            return "Sure, I can check that. May I have your full name?"
+        if not self.phone:
+            return "And what is your ten digit mobile number?"
+        if len(self.phone) != 10 or not self.phone.isdigit():
+            self.phone = None
+            return "Please provide a valid ten digit mobile number."
 
-        # Both provided, check DB
-        apps = get_appointment_for_cancellation(self.state["patient_name"], self.state["phone"])
-        self._reset_state()
-        
+        apps = get_appointment_for_cancellation(self.patient_name, self.phone)
+        self._reset()
         if not apps:
-            return "I couldn't find any confirmed appointments booked under that name and mobile number."
-            
-        # apps[0] is id, doctor_name, appointment_date, appointment_time, status, hospital_name, patient_name
+            return "I couldn't find any active appointments under that name and number."
         a = apps[0]
-        return f"Yes, your booking is confirmed, {a[6]} has an appointment with {a[1]} at {a[5]} on {a[2]} at {a[3]}."
+        return (f"Yes, {a[6]} has an appointment with {a[1]} "
+                f"at {a[5]} on {a[2]} at {a[3]}.")
 
-    def _reset_state(self):
-        self.current_flow = None
-        for key in self.state:
-            self.state[key] = None
+    def _resume_flow(self) -> str:
+        if self.current_intent == "book_appointment":
+            return "Hello! Let me continue with your booking. " + self._handle_booking()
+        if self.current_intent == "cancel_appointment":
+            return "Hello! Let me continue with your cancellation. " + self._handle_cancel()
+        return "Hello! How can I help you?"
+
+    def _reset(self):
+        self.hospital_name = None
+        self.doctor_name = None
+        self.doctor_row = None
+        self.specialization = None
+        self.appointment_date = None
+        self.appointment_time = None
+        self.patient_name = None
+        self.phone = None
+        self.address = None
+        self.current_intent = None
+        self.confirmation_pending = False
+        self.cancel_appointments = []
+
+    @property
+    def state(self) -> dict:
+        fields = {
+            "hospital_name": self.hospital_name,
+            "doctor_name": self.doctor_name,
+            "appointment_date": self.appointment_date,
+            "appointment_time": self.appointment_time,
+            "patient_name": self.patient_name,
+            "phone": self.phone,
+            "address": self.address,
+        }
+        return fields

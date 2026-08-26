@@ -58,12 +58,8 @@ class GroqProcessor(FrameProcessor):
             )
         )
 
-        try:
-            await self._generation_task
-        except asyncio.CancelledError:
-            pass
-        except Exception as exc:
-            print(f"[GROQ ERROR] {exc}")
+        # Make _generation_task a background task; don't await it here so we don't block process_frame
+        # If a new turn arrives while this runs, the next process_frame will cancel it.
 
     async def _speak_local_result(self, assistant_text, request_start):
         first_tts_time = time.perf_counter() - request_start
@@ -90,9 +86,8 @@ class GroqProcessor(FrameProcessor):
             # 1. Fast LLM Intent Extraction
             groq_start = time.perf_counter()
             
-            # Extract intent synchronously in a thread to not block event loop
-            intent_data = await asyncio.to_thread(
-                self.llm.extract_intent, 
+            # Extract intent directly as an async call to not block event loop
+            intent_data = await self.llm.extract_intent(
                 user_text, 
                 self.handler.state
             )

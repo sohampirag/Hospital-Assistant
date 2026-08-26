@@ -49,7 +49,7 @@ def normalize_date(date_str):
             found_month = months[m]
             break
             
-    day_match = re.search(r'\b(\d{1,2})\b', date_str)
+    day_match = re.search(r'\b(\d{1,2})(?:st|nd|rd|th)?\b', date_str)
     
     if found_month and day_match:
         day = int(day_match.group(1))

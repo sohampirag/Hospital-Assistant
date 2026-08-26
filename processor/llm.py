@@ -29,17 +29,18 @@ Return ONLY a valid JSON object with the following schema:
   "appointment_date": "<date if mentioned (e.g. '27 August', 'tomorrow')>",
   "appointment_time": "<time if mentioned (e.g. '1 PM', '13:00')>",
   "patient_name": "<the user's own name, if providing patient details>",
-  "phone": "<phone if mentioned>",
+  "phone": "<phone if mentioned. Convert words to digits (e.g. 'Zero'->'0', 'Triple'->3x). Return ONLY digits.>",
   "address": "<address if mentioned>"
 }
 
 CRITICAL: If the user provides both date and time in one sentence (e.g., '27 August 1 PM'), you MUST separate them into `appointment_date` ('27 August') and `appointment_time` ('1 PM').
 
-Possible intents:
 - 'greeting': User says hello.
+- 'farewell': User says goodbye, no thanks, thank you, that's all, bye, or ends the conversation.
 - 'list_hospitals': User asks what hospitals are available.
-- 'list_doctors': User asks for doctors (optionally in a hospital or by specialization).
+- 'list_doctors': User asks for doctors, checks a doctor's availability, or wants to know which doctors are available (optionally in a hospital or by specialization).
 - 'check_fee': User asks for a doctor's fee or schedule.
+- 'check_hospital': User asks which hospital a specific doctor works at or is available at.
 - 'book_appointment': User wants to book an appointment, or is providing details for one.
 - 'cancel_appointment': User wants to cancel.
 - 'check_appointment': User asks to check if they have an appointment or check its status.

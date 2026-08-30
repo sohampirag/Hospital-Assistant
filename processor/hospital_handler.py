@@ -118,6 +118,12 @@ class HospitalHandler:
         if self.confirmation_pending:
             return self._handle_confirmation(intent_data, user_text)
 
+        text_lower = re.sub(r'[^a-z0-9\s\']', '', user_text.lower().strip())
+        ending_phrases = {"no", "no thanks", "no thank you", "that's all", "thats all", "nothing else", "that is all", "i'm done", "im done", "bye", "goodbye"}
+        if text_lower in ending_phrases:
+            self._reset()
+            return "Thank you for using Jeevan Hospital Assistant. Have a great day! [END_CALL]"
+
         self._merge_entities(intent_data)
 
         # Fallback for LLM JSON failures or complete misclassifications during data collection

@@ -1,0 +1,152 @@
+import asyncio
+import os
+import uuid
+
+from dotenv import load_dotenv
+
+from pipecat.frames.frames import Frame, TranscriptionFrame, InterimTranscriptionFrame
+from pipecat.pipeline.pipeline import Pipeline
+from pipecat.pipeline.worker import PipelineParams, PipelineWorker
+from pipecat.processors.frame_processor import FrameDirection, FrameProcessor
+from pipecat.processors.frameworks.rtvi import RTVIProcessor
+from pipecat.services.sarvam.stt import SarvamSTTService
+from pipecat.services.sarvam.tts import SarvamTTSService
+
+from pipecat.transports.websocket.server import (
+    SingleClientWebsocketServerTransport,
+    SingleClientWebsocketServerParams,
+)
+from pipecat.serializers.exotel import ExotelFrameSerializer
+
+from processor.hospital_db import warmup as warmup_db
+from processor.llm import GroqLLM
+from processor.llm_processor import GroqProcessor
+from processor.manager import TurnManager
+
+load_dotenv(override=True)
+
+class TranscriptionLogger(FrameProcessor):
+    async def process_frame(self, frame: Frame, direction: FrameDirection):
+        await super().process_frame(frame, direction)
+        if isinstance(frame, TranscriptionFrame):
+            print(f"FINAL: {frame.text}")
+        elif isinstance(frame, InterimTranscriptionFrame):
+            print(f"INTERIM: {frame.text}")
+        await self.push_frame(frame, direction)
+
+
+async def main():
+    # Warmup database connection on startup
+    await asyncio.to_thread(warmup_db)
+    
+    sarvam_api_key = os.getenv("SARVAM_API_KEY")
+    if not sarvam_api_key:
+        print("SARVAM_API_KEY is missing from .env")
+        return
+    
+    conversation_id = uuid.uuid4()
+    user_id = uuid.uuid4() # We use phone number for identity in Jeevan
+
+    while True:
+        print(f"Waiting for incoming call on ws://0.0.0.0:8082... Conversation ID: {conversation_id}")
+
+        transport = SingleClientWebsocketServerTransport(
+            host="0.0.0.0",
+            port=8082,
+            params=SingleClientWebsocketServerParams(
+                audio_in_enabled=True,
+                audio_out_enabled=True,
+                audio_out_sample_rate=8000,
+                audio_out_channels=1,
+                serializer=ExotelFrameSerializer(stream_sid="tata_smartflo_stream")
+            )
+        )
+
+        stt = SarvamSTTService(
+            api_key=sarvam_api_key,
+            model="saaras:v3",
+            mode="transcribe",
+            settings=SarvamSTTService.Settings(
+                language="en-IN",
+                vad_signals=True,
+                high_vad_sensitivity=True,
+                positive_speech_threshold=0.70,
+                negative_speech_threshold=0.50,
+                min_speech_frames=2,
+                first_turn_min_speech_frames=6,
+                negative_frames_count=5,
+                negative_frames_window=8,
+                interrupt_min_speech_frames=4,
+                pre_speech_pad_frames=9,
+            ),
+        )
+
+        # Note: TTS needs to output 8kHz for PSTN
+        tts = SarvamTTSService(
+            api_key=sarvam_api_key,
+            sample_rate=8000,
+            settings=SarvamTTSService.Settings(
+                model="bulbul:v3",
+                voice="shubh",
+                language="en-IN",
+                min_buffer_size=30,
+                max_chunk_length=120,
+            ),
+        )
+
+        llm_processor = GroqProcessor(
+            GroqLLM(),
+            conversation_id,
+            user_id,
+        )
+
+        turn_manager = TurnManager(
+            conversation_id=conversation_id,
+            user_id=user_id,
+            timeout=0.18,
+        )
+
+        rtvi = RTVIProcessor()
+
+        pipeline = Pipeline(
+            [
+                transport.input(),
+                rtvi,
+                stt,
+                TranscriptionLogger(),
+                turn_manager,
+                llm_processor,
+                tts,
+                transport.output(),
+            ]
+        )
+
+        worker = PipelineWorker(
+            pipeline,
+            params=PipelineParams(enable_metrics=True),
+            observers=[rtvi.create_rtvi_observer()],
+            idle_timeout_secs=None, # Disable idle timeout so it waits indefinitely
+        )
+
+        @transport.event_handler("on_client_disconnected")
+        async def on_client_disconnected(transport, websocket):
+            print("Call disconnected")
+            await worker.cancel()
+
+        from pipecat.workers.runner import WorkerRunner
+        runner = WorkerRunner(handle_sigint=False)
+        await runner.add_workers(worker)
+
+        try:
+            print("Starting telephony pipeline...")
+            await runner.run()
+        except Exception as e:
+            print(f"Error in pipeline: {e}")
+            
+        print("Call ended. Resetting pipeline for next call...\n")
+        # Generate new conversation ID for next call
+        conversation_id = uuid.uuid4()
+
+
+if __name__ == "__main__":
+    asyncio.run(main())

@@ -1,5 +1,6 @@
 pipecat-ai
 pipecat-ai[webrtc]
+pipecat-ai[websocket]
 sarvamai
 fastapi
 uvicorn

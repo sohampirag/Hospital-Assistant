@@ -98,9 +98,18 @@ class GroqProcessor(FrameProcessor):
             # 2. Local Python execution (DB access + String formatting)
             assistant_text = await asyncio.to_thread(self.handler.process_intent, intent_data, user_text)
             
+            should_end = False
+            if "[END_CALL]" in assistant_text:
+                assistant_text = assistant_text.replace("[END_CALL]", "").strip()
+                should_end = True
+                
             # 3. Speak
             await self._speak_local_result(assistant_text, request_start)
             
+            if should_end:
+                from pipecat.frames.frames import EndFrame
+                await self.push_frame(EndFrame(), FrameDirection.DOWNSTREAM)
+                
         except asyncio.CancelledError:
             return
         except Exception as exc:

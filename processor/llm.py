@@ -52,7 +52,7 @@ class GroqLLM:
         if not api_key:
             raise ValueError("GROQ_API_KEY is missing from .env")
         self.client = AsyncGroq(api_key=api_key)
-        self.model = "openai/gpt-oss-20b"
+        self.model = "openai/gpt-oss-120b"
 
     async def extract_intent(self, text: str, state: dict) -> dict:
         """
@@ -65,11 +65,11 @@ class GroqLLM:
         pending_str = ", ".join(pending.keys()) if pending else "none"
 
         system_prompt = (
-            "You are Jeevan Mishra, a hospital appointment assistant.\n"
+            "You are Aradhya Mishra, a hospital appointment assistant.\n"
             "Help ONLY with: hospitals, doctors, specialties, fees, schedules, "
             "availability, appointments (booking/cancellation/check).\n"
             "For any unrelated question reply with intent=unrelated.\n\n"
-            "Return ONLY valid JSON with these keys:\n"
+            "Return ONLY valid JSON with these keys. Do not include any additional text or formatting outside the JSON:\n"
             "{\n"
             '  "intent": "<see list below>",\n'
             '  "doctor_name": "<doctor if explicitly mentioned, else null>",\n'
@@ -107,7 +107,7 @@ class GroqLLM:
                 ],
                 temperature=0,
                 response_format={"type": "json_object"},
-                max_tokens=300,
+                max_tokens=1024,
             )
             raw = completion.choices[0].message.content
             result = json.loads(raw)

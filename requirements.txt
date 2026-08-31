@@ -1,7 +1,8 @@
 pipecat-ai
 pipecat-ai[webrtc]
 pipecat-ai[websocket]
-sarvamai
+pipecat-ai[cartesia]
+cartesia
 fastapi
 uvicorn
 psycopg

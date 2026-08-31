@@ -9,8 +9,8 @@ from pipecat.pipeline.pipeline import Pipeline
 from pipecat.pipeline.worker import PipelineParams, PipelineWorker
 from pipecat.processors.frame_processor import FrameDirection, FrameProcessor
 from pipecat.processors.frameworks.rtvi import RTVIProcessor
-from pipecat.services.sarvam.stt import SarvamSTTService
-from pipecat.services.sarvam.tts import SarvamTTSService
+from pipecat.services.cartesia.stt import CartesiaSTTService
+from pipecat.services.cartesia.tts import CartesiaTTSService
 
 from pipecat.transports.websocket.server import (
     SingleClientWebsocketServerTransport,
@@ -39,9 +39,9 @@ async def main():
     # Warmup database connection on startup
     await asyncio.to_thread(warmup_db)
     
-    sarvam_api_key = os.getenv("SARVAM_API_KEY")
-    if not sarvam_api_key:
-        print("SARVAM_API_KEY is missing from .env")
+    cartesia_api_key = os.getenv("CARTESIA_API_KEY")
+    if not cartesia_api_key:
+        print("CARTESIA_API_KEY is missing from .env")
         return
     
     conversation_id = uuid.uuid4()
@@ -62,36 +62,15 @@ async def main():
             )
         )
 
-        stt = SarvamSTTService(
-            api_key=sarvam_api_key,
-            model="saaras:v3",
-            mode="transcribe",
-            settings=SarvamSTTService.Settings(
-                language="en-IN",
-                vad_signals=True,
-                high_vad_sensitivity=True,
-                positive_speech_threshold=0.70,
-                negative_speech_threshold=0.50,
-                min_speech_frames=2,
-                first_turn_min_speech_frames=6,
-                negative_frames_count=5,
-                negative_frames_window=8,
-                interrupt_min_speech_frames=4,
-                pre_speech_pad_frames=9,
-            ),
+        stt = CartesiaSTTService(
+            api_key=cartesia_api_key,
         )
 
         # Note: TTS needs to output 8kHz for PSTN
-        tts = SarvamTTSService(
-            api_key=sarvam_api_key,
+        tts = CartesiaTTSService(
+            api_key=cartesia_api_key,
+            voice_id="79a125e8-cd45-4c13-8a67-188112f4dd22", # British Lady
             sample_rate=8000,
-            settings=SarvamTTSService.Settings(
-                model="bulbul:v3",
-                voice="shubh",
-                language="en-IN",
-                min_buffer_size=30,
-                max_chunk_length=120,
-            ),
         )
 
         llm_processor = GroqProcessor(

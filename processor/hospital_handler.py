@@ -1,5 +1,5 @@
 """
-hospital_handler.py  –  Jeevan Mishra Hospital Assistant
+hospital_handler.py  –  Aradhya Mishra Hospital Assistant
 
 Architecture:
   - One HospitalHandler instance per session (per call). State is NOT shared.
@@ -114,6 +114,9 @@ class HospitalHandler:
 
     def process_intent(self, intent_data: dict, user_text: str = "") -> str:
         intent = intent_data.get("intent", "unrelated")
+        if not isinstance(intent, str):
+            intent = "unrelated"
+        intent = intent.lower()
 
         if self.confirmation_pending:
             return self._handle_confirmation(intent_data, user_text)
@@ -122,7 +125,7 @@ class HospitalHandler:
         ending_phrases = {"no", "no thanks", "no thank you", "that's all", "thats all", "nothing else", "that is all", "i'm done", "im done", "bye", "goodbye"}
         if text_lower in ending_phrases:
             self._reset()
-            return "Thank you for using Jeevan Hospital Assistant. Have a great day! [END_CALL]"
+            return "Thank you for using Aradhya Hospital Assistant. Have a great day! [END_CALL]"
 
         self._merge_entities(intent_data)
 
@@ -148,7 +151,10 @@ class HospitalHandler:
         if self.current_intent == "book_appointment":
             if intent in ("unrelated", "unknown", "hospital_information", "doctor_information", "fee_information", "schedule_information"):
                 # If they provided ANY useful booking entity in this turn, force book_appointment
-                if any(intent_data.get(k) for k in ["patient_name", "phone", "address", "hospital_name", "doctor_name", "appointment_date", "appointment_time"]):
+                def _is_valid(val):
+                    return bool(val and str(val).lower() not in ("none", "null", ""))
+
+                if any(_is_valid(intent_data.get(k)) for k in ["patient_name", "phone", "address", "hospital_name", "doctor_name", "appointment_date", "appointment_time"]):
                     intent = "book_appointment"
 
         # Logging to verify router
@@ -165,7 +171,7 @@ class HospitalHandler:
             if self.current_intent:
                 return self._resume_flow()
             self._reset()
-            return ("Hello! I am Jeevan Mishra, your hospital assistant. "
+            return ("Hello! I am Aradhya Mishra, your hospital assistant. "
                     "I can help you with hospital information, doctor availability, "
                     "and appointment booking. How can I help you today?")
                     

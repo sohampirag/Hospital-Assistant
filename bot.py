@@ -10,8 +10,8 @@ from pipecat.processors.frame_processor import FrameDirection, FrameProcessor
 from pipecat.processors.frameworks.rtvi import RTVIProcessor
 from pipecat.runner.types import RunnerArguments
 from pipecat.runner.utils import create_transport
-from pipecat.services.sarvam.stt import SarvamSTTService
-from pipecat.services.sarvam.tts import SarvamTTSService
+from pipecat.services.cartesia.stt import CartesiaSTTService
+from pipecat.services.cartesia.tts import CartesiaTTSService
 from pipecat.transports.base_transport import TransportParams
 from pipecat.workers.runner import WorkerRunner
 
@@ -44,9 +44,9 @@ transport_params = {
 async def bot(runner_args: RunnerArguments):
     transport = await create_transport(runner_args, transport_params)
 
-    sarvam_api_key = os.getenv("SARVAM_API_KEY")
-    if not sarvam_api_key:
-        raise ValueError("SARVAM_API_KEY is missing from .env")
+    cartesia_api_key = os.getenv("CARTESIA_API_KEY")
+    if not cartesia_api_key:
+        raise ValueError("CARTESIA_API_KEY is missing from .env")
     if not os.getenv("GROQ_API_KEY"):
         raise ValueError("GROQ_API_KEY is missing from .env")
     if not os.getenv("NEON_DATABASE_URL"):
@@ -58,36 +58,15 @@ async def bot(runner_args: RunnerArguments):
     print(f"Conversation ID: {conversation_id}")
     print(f"Agent User ID: {user_id} (Dummy for hospital assistant)")
 
-    stt = SarvamSTTService(
-        api_key=sarvam_api_key,
-        model="saaras:v3",
-        mode="transcribe",
-        settings=SarvamSTTService.Settings(
-            language="en-IN",
-            vad_signals=True,
-            high_vad_sensitivity=True,
-            positive_speech_threshold=0.70,
-            negative_speech_threshold=0.50,
-            min_speech_frames=2,
-            first_turn_min_speech_frames=6,
-            negative_frames_count=5,
-            negative_frames_window=8,
-            interrupt_min_speech_frames=4,
-            pre_speech_pad_frames=9,
-        ),
+    stt = CartesiaSTTService(
+        api_key=cartesia_api_key,
     )
 
     # Keep the WebSocket TTS configuration simple and supported.
     # Sentence-sized LLM frames are emitted by GroqProcessor.
-    tts = SarvamTTSService(
-        api_key=sarvam_api_key,
-        settings=SarvamTTSService.Settings(
-            model="bulbul:v3",
-            voice="shubh",
-            language="en-IN",
-            min_buffer_size=30,
-            max_chunk_length=120,
-        ),
+    tts = CartesiaTTSService(
+        api_key=cartesia_api_key,
+        voice_id="79a125e8-cd45-4c13-8a67-188112f4dd22", # British Lady
     )
 
     llm_processor = GroqProcessor(
@@ -131,7 +110,7 @@ async def bot(runner_args: RunnerArguments):
     async def on_client_connected(transport, client):
         print("Client connected")
         print(f"Conversation ID: {conversation_id}")
-        print("Jeevan Mishra is ready.")
+        print("Aradhya Mishra is ready.")
 
     @transport.event_handler("on_client_disconnected")
     async def on_client_disconnected(transport, client):

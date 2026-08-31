@@ -43,7 +43,7 @@ class GroqProcessor(FrameProcessor):
 
         if not self.greeted:
             self.greeted = True
-            assistant_text = "Hello, I'm Jeevan Mishra, your hospital assistant. How can I help you today?"
+            assistant_text = "Hello, I'm Aradhya Mishra, your hospital assistant. How can I help you today?"
             print(f"[PERF] RESPONSE READY: {time.perf_counter()-request_start:.3f}s")
             await self._speak_local_result(assistant_text, request_start)
             return

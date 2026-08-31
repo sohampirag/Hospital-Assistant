@@ -19,6 +19,7 @@ def normalize_date(date_str):
     if not date_str:
         return None
     date_str = str(date_str).lower().strip()
+    date_str = date_str.replace(" of ", " ")
     
     # Try YYYY-MM-DD directly
     if re.match(r"^\d{4}-\d{2}-\d{2}$", date_str):
@@ -69,6 +70,9 @@ def normalize_time(time_str):
     if not time_str:
         return None
     time_str = str(time_str).upper().strip()
+    
+    # Add space before AM/PM if missing (e.g. 1PM -> 1 PM)
+    time_str = re.sub(r'(\d)(AM|PM)', r'\1 \2', time_str)
     
     # STT often confuses 12 PM for 12 AM. Nobody books a doctor at midnight.
     if "12 AM" in time_str:

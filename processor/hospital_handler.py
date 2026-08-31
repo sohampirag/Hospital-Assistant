@@ -108,6 +108,7 @@ class HospitalHandler:
         
         self.current_intent: str | None = None
         self.confirmation_pending: bool = False
+        self.navigation_booking_pending: bool = False
         
         self.cancel_appointments: list = []
         self.cancel_idx: int = 0
@@ -120,6 +121,16 @@ class HospitalHandler:
 
         if self.confirmation_pending:
             return self._handle_confirmation(intent_data, user_text)
+
+        if getattr(self, "navigation_booking_pending", False):
+            self.navigation_booking_pending = False
+            text_lower = user_text.lower().strip()
+            confirm = intent_data.get("confirmation")
+            if confirm == "yes" or any(w in text_lower for w in ("yes", "yeah", "sure", "ok", "book")):
+                intent = "book_appointment"
+                self.current_intent = "book_appointment"
+            elif confirm == "no" or any(w in text_lower for w in ("no", "nope")):
+                return "Alright. How else can I help you?"
 
         text_lower = re.sub(r'[^a-z0-9\s\']', '', user_text.lower().strip())
         ending_phrases = {"no", "no thanks", "no thank you", "that's all", "thats all", "nothing else", "that is all", "i'm done", "im done", "bye", "goodbye"}
@@ -181,6 +192,9 @@ class HospitalHandler:
         if intent == "list_doctors":
             return self._handle_list_doctors(intent_data)
             
+        if intent == "patient_navigation":
+            return self._handle_patient_navigation(intent_data)
+
         if intent == "check_specialization" or intent == "specialization_information":
             return self._handle_check_specialization(intent_data)
             
@@ -340,6 +354,40 @@ class HospitalHandler:
         ]
         return f"We have the following doctors: {', '.join(doc_list)}."
 
+    def _handle_patient_navigation(self, d: dict) -> str:
+        spec = d.get("specialization") or self.specialization
+        valid_specs = ["Cardiology", "Gastroenterology", "Orthopaedics", "Gynaecology", "General Medicine", "Dermatology"]
+        
+        matched_spec = None
+        if spec:
+            for v in valid_specs:
+                if v.lower() == str(spec).lower():
+                    matched_spec = v
+                    break
+
+        if not matched_spec:
+            return "I can help you find a doctor from Cardiology, Gastroenterology, Orthopaedics, Gynaecology, General Medicine, or Dermatology."
+
+        self.specialization = matched_spec
+        rows = get_doctors_by_specialization(matched_spec, self.hospital_name)
+        if not rows:
+            return f"I couldn't find any {matched_spec} doctors."
+
+        doc_list = []
+        for r in rows:
+            name = f"{r[0] if str(r[0]).startswith('Dr') else 'Dr. ' + r[0]}"
+            fee = int(float(r[1])) if r[1] else 0
+            schedule = r[2]
+            hospital = r[3]
+            if self.hospital_name:
+                doc_list.append(f"{name} (fee: rupees {fee}, schedule: {schedule})")
+            else:
+                doc_list.append(f"{name} at {hospital} (fee: rupees {fee}, schedule: {schedule})")
+        
+        docs_str = ", ".join(doc_list)
+        self.navigation_booking_pending = True
+        return f"A {matched_spec} department may be appropriate. We have: {docs_str}. Would you like to book an appointment?"
+
     def _handle_check_specialization(self, d: dict) -> str:
         spec = self.specialization or d.get("specialization")
         if not spec:
@@ -361,7 +409,7 @@ class HospitalHandler:
             return "Which doctor would you like information about?"
         display = _fmt_doc(doc)
         if intent in ("check_fee", "fee_information"):
-            return f"{display} charges rupees {doc[3]}."
+            return f"{display} charges rupees {int(float(doc[3]))}."
         if intent in ("check_schedule", "schedule_information"):
             return f"{display} is available {doc[4]}."
         if intent in ("check_hospital", "hospital_information", "doctor_information"):
@@ -405,7 +453,7 @@ class HospitalHandler:
 
         if not self.appointment_date or not self.appointment_time:
             return (f"{display} specializes in {doc[2]} at {self.hospital_name}. "
-                    f"The consultation fee is rupees {doc[3]} and they are available {doc[4]}. "
+                    f"The consultation fee is rupees {int(float(doc[3]))} and they are available {doc[4]}. "
                     "What date and time would you like to book?")
 
         # All core booking info present, check availability
@@ -433,17 +481,14 @@ class HospitalHandler:
             return "Got it. Finally, what is your address?"
 
         # All fields present – show summary and ask confirmation
-        from processor.hospital_db import normalize_date, normalize_time
-        fmt_date = normalize_date(self.appointment_date) or self.appointment_date
-        fmt_time = normalize_time(self.appointment_time) or self.appointment_time
         self.confirmation_pending = True
         return (
             f"Please confirm your booking: "
             f"{display} at {self.hospital_name}, "
-            f"on {fmt_date} at {fmt_time}, "
-            f"fee rupees {doc[3]}, "
+            f"on {self.appointment_date} at {self.appointment_time}, "
+            f"fee rupees {int(float(doc[3]))}, "
             f"patient {self.patient_name}, "
-            f"number ending {self.phone[-4:]}. "
+            f"number ending {' '.join(self.phone[-4:])}. "
             "Shall I confirm this booking? Say yes or no."
         )
 
@@ -560,6 +605,7 @@ class HospitalHandler:
         self.address = None
         self.current_intent = None
         self.confirmation_pending = False
+        self.navigation_booking_pending = False
         self.cancel_appointments = []
 
     @property

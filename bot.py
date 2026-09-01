@@ -66,7 +66,7 @@ async def bot(runner_args: RunnerArguments):
     # Sentence-sized LLM frames are emitted by GroqProcessor.
     tts = CartesiaTTSService(
         api_key=cartesia_api_key,
-        voice_id="79a125e8-cd45-4c13-8a67-188112f4dd22", # British Lady
+        voice_id="95d51f79-c397-46f9-b49a-23763d3eaa2d", # Arushi - Indian Voice
     )
 
     llm_processor = GroqProcessor(

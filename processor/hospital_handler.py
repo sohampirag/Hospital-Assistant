@@ -77,11 +77,17 @@ def _resolve_doctor(name_hint: str, hospital_filter: str | None = None) -> tuple
     if not cand_names:
         return None
 
-    cand_lower = {c.lower(): c for c in cand_names}
-    matches = difflib.get_close_matches(clean.lower(), cand_lower.keys(), n=1, cutoff=0.55)
+    # Map cleaned candidate names to original DB names
+    cand_map = {}
+    for c in cand_names:
+        c_clean = re.sub(r'^(dr\.?|doctor)\s+', '', c.strip(), flags=re.I).strip().lower()
+        # Keep track of the original name so we can look it up in DB
+        cand_map[c_clean] = c
+
+    matches = difflib.get_close_matches(clean.lower(), cand_map.keys(), n=1, cutoff=0.5)
     if matches:
-        resolved = cand_lower[matches[0]]
-        return get_doctor_by_name(resolved)
+        resolved_original = cand_map[matches[0]]
+        return get_doctor_by_name(resolved_original)
 
     return None
 
@@ -231,90 +237,86 @@ class HospitalHandler:
             extracted_patient = str(raw_p).strip()
 
         # ── Doctor resolution ────────────────────────────────────────────────
-        # Must resolve doctor FIRST. The LLM often puts bare doctor names into
-        # patient_name when no "Dr." prefix is present.
-        if not self.doctor_name:
-            raw_d = d.get("doctor_name")
-            explicit_doc = raw_d if (raw_d and str(raw_d).lower() not in ("none", "null", "")) else None
+        raw_d = d.get("doctor_name")
+        explicit_doc = raw_d if (raw_d and str(raw_d).lower() not in ("none", "null", "")) else None
 
-            # Build an ordered list of candidates to try for doctor resolution
-            candidates_to_try = []
-            if explicit_doc:
-                candidates_to_try.append(explicit_doc)
-            # Before date/time is known, any name (from patient_name field or previous state) may be a doctor
-            if not (self.appointment_date and self.appointment_time):
-                if extracted_patient and extracted_patient not in candidates_to_try:
-                    candidates_to_try.append(extracted_patient)
-                if self.patient_name and self.patient_name not in candidates_to_try:
-                    candidates_to_try.append(self.patient_name)
+        candidates_to_try = []
+        if explicit_doc:
+            candidates_to_try.append(explicit_doc)
+            
+        # Before date/time is known, try guessing from patient_name ONLY if we don't already have a doctor
+        if not self.doctor_name and not (self.appointment_date and self.appointment_time):
+            if extracted_patient and extracted_patient not in candidates_to_try:
+                candidates_to_try.append(extracted_patient)
+            if self.patient_name and self.patient_name not in candidates_to_try:
+                candidates_to_try.append(self.patient_name)
 
-            for candidate in candidates_to_try:
-                doc = _resolve_doctor(candidate, self.hospital_name)
-                if doc:
-                    self.doctor_row = doc
-                    self.doctor_name = doc[1]
-                    if not self.hospital_name:
-                        self.hospital_name = doc[5]
-                    self.specialization = doc[2]
-                    # If the candidate came from patient_name state, clear it (it was misclassified)
-                    if self.patient_name == candidate:
-                        self.patient_name = None
-                    if extracted_patient == candidate:
-                        extracted_patient = None
-                    break  # Stop once we have a valid doctor
+        for candidate in candidates_to_try:
+            doc = _resolve_doctor(candidate, self.hospital_name)
+            if doc:
+                # If changing doctors, clear the date/time since the schedule is different
+                if self.doctor_name and self.doctor_name != doc[1]:
+                    self.appointment_date = None
+                    self.appointment_time = None
+                    
+                self.doctor_row = doc
+                self.doctor_name = doc[1]
+                if not self.hospital_name:
+                    self.hospital_name = doc[5]
+                self.specialization = doc[2]
+                
+                # If the candidate came from patient_name state, clear it (it was misclassified)
+                if self.patient_name == candidate:
+                    self.patient_name = None
+                if extracted_patient == candidate:
+                    extracted_patient = None
+                break  # Stop once we have a valid doctor
 
         # Only store as patient_name if the value is NOT a doctor
-        if not self.patient_name and extracted_patient:
+        if extracted_patient:
             if not _resolve_doctor(extracted_patient, self.hospital_name):
                 self.patient_name = extracted_patient
 
         # Phone
-        if not self.phone:
-            raw_ph = d.get("phone")
-            if raw_ph:
-                digits = re.sub(r"\D", "", str(raw_ph))
-                if digits:
-                    self.phone = digits
+        raw_ph = d.get("phone")
+        if raw_ph:
+            digits = re.sub(r"\D", "", str(raw_ph))
+            if digits:
+                self.phone = digits
 
         # Address
-        if not self.address:
-            raw_a = d.get("address")
-            if raw_a and str(raw_a).lower() not in ("none", "null", ""):
-                self.address = str(raw_a).strip()
+        raw_a = d.get("address")
+        if raw_a and str(raw_a).lower() not in ("none", "null", ""):
+            self.address = str(raw_a).strip()
 
         # Hospital
-        if not self.hospital_name:
-            raw_h = d.get("hospital_name")
-            if raw_h:
-                resolved = _normalize_hospital(raw_h)
-                if resolved:
-                    self.hospital_name = resolved
+        raw_h = d.get("hospital_name")
+        if raw_h:
+            resolved = _normalize_hospital(raw_h)
+            if resolved:
+                self.hospital_name = resolved
 
         # Specialization
-        if not self.specialization:
-            raw_s = d.get("specialization")
-            if raw_s:
-                self.specialization = str(raw_s).strip()
+        raw_s = d.get("specialization")
+        if raw_s:
+            self.specialization = str(raw_s).strip()
 
         # Date/Time
-        if not self.appointment_date:
-            raw_date = d.get("appointment_date")
-            if raw_date and str(raw_date).lower() not in ("none", "null", ""):
-                time_in_date = re.search(
-                    r'\b(\d{1,2})(?::(\d{2}))?\s*(AM|PM|am|pm)\b',
-                    str(raw_date)
-                )
-                if time_in_date:
-                    if not self.appointment_time:
-                        self.appointment_time = time_in_date.group(0)
-                    self.appointment_date = str(raw_date)[:time_in_date.start()].strip()
-                else:
-                    self.appointment_date = str(raw_date).strip()
+        raw_date = d.get("appointment_date")
+        if raw_date and str(raw_date).lower() not in ("none", "null", ""):
+            time_in_date = re.search(
+                r'\b(\d{1,2})(?::(\d{2}))?\s*(AM|PM|am|pm)\b',
+                str(raw_date)
+            )
+            if time_in_date:
+                self.appointment_time = time_in_date.group(0)
+                self.appointment_date = str(raw_date)[:time_in_date.start()].strip()
+            else:
+                self.appointment_date = str(raw_date).strip()
 
-        if not self.appointment_time:
-            raw_time = d.get("appointment_time")
-            if raw_time and str(raw_time).lower() not in ("none", "null", ""):
-                self.appointment_time = str(raw_time).strip()
+        raw_time = d.get("appointment_time")
+        if raw_time and str(raw_time).lower() not in ("none", "null", ""):
+            self.appointment_time = str(raw_time).strip()
 
     def _looks_like_patient_context(self, d: dict) -> bool:
         p = d.get("patient_name")

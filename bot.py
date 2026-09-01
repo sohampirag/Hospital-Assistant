@@ -60,6 +60,7 @@ async def bot(runner_args: RunnerArguments):
 
     stt = CartesiaSTTService(
         api_key=cartesia_api_key,
+        model="Ink-2",
     )
 
     # Keep the WebSocket TTS configuration simple and supported.

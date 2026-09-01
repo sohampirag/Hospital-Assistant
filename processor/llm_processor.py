@@ -38,6 +38,13 @@ class GroqProcessor(FrameProcessor):
         if not user_text:
             return
 
+        # Prevent echo loops if STT hears the TTS
+        last_bot = getattr(self, "last_assistant_text", "").lower()
+        # If the recognized text is basically just the bot's own text, drop it.
+        if last_bot and (user_text.lower() in last_bot or last_bot in user_text.lower()):
+            print(f"[ECHO CANCEL] Dropped echo: {user_text}")
+            return
+
         request_start = time.perf_counter()
         print(f"[USER] {user_text}")
 
@@ -51,9 +58,6 @@ class GroqProcessor(FrameProcessor):
         if self._generation_task and not self._generation_task.done():
             self._generation_task.cancel()
 
-        from pipecat.frames.frames import CancelFrame
-        await self.push_frame(CancelFrame(), FrameDirection.DOWNSTREAM)
-
         self._generation_task = asyncio.create_task(
             self._generate(
                 user_text,
@@ -65,6 +69,7 @@ class GroqProcessor(FrameProcessor):
         # If a new turn arrives while this runs, the next process_frame will cancel it.
 
     async def _speak_local_result(self, assistant_text, request_start):
+        self.last_assistant_text = assistant_text
         first_tts_time = time.perf_counter() - request_start
         print(f"[PERF] TOTAL: {first_tts_time:.3f}s")
         print(f"[ASSISTANT] {assistant_text}")

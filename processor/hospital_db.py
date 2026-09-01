@@ -71,6 +71,9 @@ def normalize_time(time_str):
         return None
     time_str = str(time_str).upper().strip()
     
+    # Strip dots from a.m. / p.m.
+    time_str = re.sub(r'([AP])\.M\.', r'\1M', time_str)
+    
     # Add space before AM/PM if missing (e.g. 1PM -> 1 PM)
     time_str = re.sub(r'(\d)(AM|PM)', r'\1 \2', time_str)
     

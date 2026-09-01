@@ -33,6 +33,7 @@ from processor.hospital_db import (
 _HOSPITAL_ALIASES = {
     "apollo": "Apollo Hospitals Indore",
     "shukla": "Shukla Hospital",
+    "sukla": "Shukla Hospital",
     "bombay": "Bombay Hospital Indore",
     "choithram": "Choithram Hospital & Research Centre",
     "chaitram": "Choithram Hospital & Research Centre",
@@ -147,32 +148,31 @@ class HospitalHandler:
         self._merge_entities(intent_data)
 
         # Fallback for LLM JSON failures or complete misclassifications during data collection
-        if self.current_intent == "book_appointment":
+        if self.current_intent in ("book_appointment", "cancel_appointment", "check_appointment"):
             if intent in ("unrelated", "unknown") and not any(intent_data.get(k) for k in ["patient_name", "phone", "address", "hospital_name", "doctor_name", "appointment_date", "appointment_time"]):
-                if self.hospital_name and self.doctor_name and self.appointment_date and self.appointment_time:
-                    text_clean = user_text.strip()
-                    if text_clean:
-                        if not self.patient_name:
-                            self.patient_name = text_clean
-                            intent = "book_appointment"
-                        elif not self.phone:
-                            digits = re.sub(r"\D", "", text_clean)
-                            if len(digits) >= 10:
-                                self.phone = digits
-                                intent = "book_appointment"
-                        elif not self.address:
-                            self.address = text_clean
-                            intent = "book_appointment"
+                text_clean = user_text.strip()
+                if text_clean:
+                    if not self.patient_name:
+                        self.patient_name = text_clean
+                        intent = self.current_intent
+                    elif not self.phone:
+                        digits = re.sub(r"\D", "", text_clean)
+                        if len(digits) >= 10:
+                            self.phone = digits
+                            intent = self.current_intent
+                    elif self.current_intent == "book_appointment" and not self.address:
+                        self.address = text_clean
+                        intent = self.current_intent
 
         # Robust intent override: if we are in a booking flow and the LLM misclassified a single-entity response
-        if self.current_intent == "book_appointment":
+        if self.current_intent in ("book_appointment", "cancel_appointment", "check_appointment"):
             if intent in ("unrelated", "unknown", "hospital_information", "doctor_information", "fee_information", "schedule_information"):
-                # If they provided ANY useful booking entity in this turn, force book_appointment
+                # If they provided ANY useful booking entity in this turn, force current intent
                 def _is_valid(val):
                     return bool(val and str(val).lower() not in ("none", "null", ""))
 
                 if any(_is_valid(intent_data.get(k)) for k in ["patient_name", "phone", "address", "hospital_name", "doctor_name", "appointment_date", "appointment_time"]):
-                    intent = "book_appointment"
+                    intent = self.current_intent
 
         # Logging to verify router
         print(f"[ROUTER] intent={intent}")
@@ -304,19 +304,22 @@ class HospitalHandler:
         # Date/Time
         raw_date = d.get("appointment_date")
         if raw_date and str(raw_date).lower() not in ("none", "null", ""):
+            # STT might output a.m. or p.m. with dots. Remove dots to normalize.
+            date_clean = re.sub(r'([ap])\.m\.', r'\1m', str(raw_date), flags=re.I)
             time_in_date = re.search(
                 r'\b(\d{1,2})(?::(\d{2}))?\s*(AM|PM|am|pm)\b',
-                str(raw_date)
+                date_clean
             )
             if time_in_date:
                 self.appointment_time = time_in_date.group(0)
-                self.appointment_date = str(raw_date)[:time_in_date.start()].strip()
+                self.appointment_date = date_clean[:time_in_date.start()].strip()
             else:
                 self.appointment_date = str(raw_date).strip()
 
         raw_time = d.get("appointment_time")
         if raw_time and str(raw_time).lower() not in ("none", "null", ""):
-            self.appointment_time = str(raw_time).strip()
+            time_clean = re.sub(r'([ap])\.m\.', r'\1m', str(raw_time), flags=re.I)
+            self.appointment_time = time_clean.strip()
 
     def _looks_like_patient_context(self, d: dict) -> bool:
         p = d.get("patient_name")

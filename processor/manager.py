@@ -29,23 +29,9 @@ class TurnManager(FrameProcessor):
         # Filter out random noise blips that only contain punctuation (like "." or "-")
         if not any(c.isalnum() for c in text):
             return
-        # Sarvam can split one spoken sentence into several finals when VAD ends early.
-        # Keep only incomplete/continuation fragments for a very short merge window.
-        if self.current_text:
-            if _CONTINUATION_START.match(text) or _CONTINUATION_END.search(self.current_text):
-                self.current_text = self._merge(self.current_text, text)
-                self._restart_timer()
-                return
-            else:
-                text = self._merge(self.current_text, text)
-                self.current_text = ""
-                
-        if _CONTINUATION_END.search(text):
-            self.current_text = text
-            self._restart_timer()
-            return
             
-        await self._emit(text)
+        self.current_text = self._merge(self.current_text, text)
+        self._restart_timer()
 
     def _restart_timer(self):
         if self.timer and not self.timer.done(): self.timer.cancel()

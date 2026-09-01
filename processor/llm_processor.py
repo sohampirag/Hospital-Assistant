@@ -51,6 +51,9 @@ class GroqProcessor(FrameProcessor):
         if self._generation_task and not self._generation_task.done():
             self._generation_task.cancel()
 
+        from pipecat.frames.frames import CancelFrame
+        await self.push_frame(CancelFrame(), FrameDirection.DOWNSTREAM)
+
         self._generation_task = asyncio.create_task(
             self._generate(
                 user_text,

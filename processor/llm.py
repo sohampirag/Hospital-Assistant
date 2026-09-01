@@ -93,7 +93,7 @@ class GroqLLM:
             "- If the user says 'Book Dr. X tomorrow at 11 AM', set intent=book_appointment, "
             "doctor_name=Dr. X, appointment_date=tomorrow, appointment_time=11 AM.\n"
             "- NEVER put a patient name into doctor_name. Patient names go in patient_name.\n"
-            "- If user says 'My name is Ashish', patient_name=Ashish, doctor_name=null.\n"
+            "- If user says 'My name is Ashish', patient_name=Ashish, doctor_name=null. Pay close attention to phrases like 'My name is X' or 'My full name is X'. If the transcript has phonetic misspellings of the name (e.g., 'You\\'re a jirator' instead of 'Yuvraj Rathore', or 'Yuraj Raathor'), extract the most likely human name.\n"
             "- For phone: convert 'one two three' -> '123', 'double four' -> '44', 'oh' -> '0'.\n"
             "- Separate date and time always. '27 August 11 AM' -> appointment_date='27 August', appointment_time='11 AM'.\n"
             "- If the user provides an address, location, or area, set address to it. If we are booking, keep intent=book_appointment.\n"

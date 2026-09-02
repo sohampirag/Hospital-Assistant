@@ -38,12 +38,13 @@ class GroqProcessor(FrameProcessor):
         if not user_text:
             return
 
-        # Prevent echo loops if STT hears the TTS
-        last_bot = getattr(self, "last_assistant_text", "").lower()
-        # If the recognized text is basically just the bot's own text, drop it.
-        if last_bot and (user_text.lower() in last_bot or last_bot in user_text.lower()):
-            print(f"[ECHO CANCEL] Dropped echo: {user_text}")
-            return
+        # Prevent echo loops if STT hears the TTS (only for long texts, never for short responses like 'yes'/'no')
+        last_bot = getattr(self, "last_assistant_text", "").lower().strip()
+        user_clean = user_text.lower().strip()
+        if last_bot and len(user_clean) > 8:
+            if user_clean in last_bot or last_bot in user_clean:
+                print(f"[ECHO CANCEL] Dropped echo: {user_text}")
+                return
 
         request_start = time.perf_counter()
         print(f"[USER] {user_text}")

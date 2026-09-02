@@ -10,8 +10,9 @@ from pipecat.processors.frame_processor import FrameDirection, FrameProcessor
 from pipecat.processors.frameworks.rtvi import RTVIProcessor
 from pipecat.runner.types import RunnerArguments
 from pipecat.runner.utils import create_transport
-from pipecat.services.cartesia.stt import CartesiaSTTService
 from pipecat.services.cartesia.tts import CartesiaTTSService
+from pipecat.services.sarvam.stt import SarvamSTTService
+from pipecat.transcriptions.language import Language
 from pipecat.transports.base_transport import TransportParams
 from pipecat.workers.runner import WorkerRunner
 
@@ -47,6 +48,9 @@ async def bot(runner_args: RunnerArguments):
     cartesia_api_key = os.getenv("CARTESIA_API_KEY")
     if not cartesia_api_key:
         raise ValueError("CARTESIA_API_KEY is missing from .env")
+    sarvam_api_key = os.getenv("SARVAM_API_KEY")
+    if not sarvam_api_key:
+        raise ValueError("SARVAM_API_KEY is missing from .env")
     if not os.getenv("GROQ_API_KEY"):
         raise ValueError("GROQ_API_KEY is missing from .env")
     if not os.getenv("NEON_DATABASE_URL"):
@@ -58,9 +62,9 @@ async def bot(runner_args: RunnerArguments):
     print(f"Conversation ID: {conversation_id}")
     print(f"Agent User ID: {user_id} (Dummy for hospital assistant)")
 
-    stt = CartesiaSTTService(
-        api_key=cartesia_api_key,
-        model="Ink-2",
+    stt = SarvamSTTService(
+        api_key=sarvam_api_key,
+        language=Language.EN_IN,
     )
 
     # Keep the WebSocket TTS configuration simple and supported.

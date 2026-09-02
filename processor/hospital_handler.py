@@ -120,6 +120,7 @@ class HospitalHandler:
         self.current_intent: str | None = None
         self.confirmation_pending: bool = False
         self.navigation_booking_pending: bool = False
+        self.awaiting_anything_else: bool = False
         
         self.cancel_appointments: list = []
         self.cancel_idx: int = 0
@@ -141,13 +142,16 @@ class HospitalHandler:
                 intent = "book_appointment"
                 self.current_intent = "book_appointment"
             elif confirm == "no" or any(w in text_lower for w in ("no", "nope")):
+                self.awaiting_anything_else = True
                 return "Alright. How else can I help you?"
 
-        text_lower = re.sub(r'[^a-z0-9\s\']', '', user_text.lower().strip())
-        ending_phrases = {"no", "no thanks", "no thank you", "that's all", "thats all", "nothing else", "that is all", "i'm done", "im done", "bye", "goodbye"}
-        if text_lower in ending_phrases:
+        text_clean_lower = re.sub(r'[^a-z0-9\s\']', '', user_text.lower().strip())
+        explicit_ending = {"no thanks", "no thank you", "that's all", "thats all", "nothing else", "that is all", "i'm done", "im done", "bye", "goodbye", "nothing"}
+        if text_clean_lower in explicit_ending or (getattr(self, "awaiting_anything_else", False) and text_clean_lower in ("no", "nope", "nahi", "nahin")):
             self._reset()
             return "Thank you for using Aradhya Hospital Assistant. Have a great day! [END_CALL]"
+
+        self.awaiting_anything_else = False
 
         self._merge_entities(intent_data, user_text)
 
@@ -522,7 +526,7 @@ class HospitalHandler:
         text_lower = user_text.lower().strip()
 
         if confirm is None:
-            if any(w in text_lower for w in ("yes", "yeah", "confirm", "ok", "haan", "ha", "bilkul")):
+            if any(w in text_lower for w in ("yes", "yeah", "confirm", "ok", "haan", "ha", "bilkul", "thik", "theek", "sure", "yep", "do it")):
                 confirm = "yes"
             elif any(w in text_lower for w in ("no", "nahi", "nope", "cancel", "nahin")):
                 confirm = "no"
@@ -534,6 +538,7 @@ class HospitalHandler:
         if confirm == "no":
             self.confirmation_pending = False
             self._reset()
+            self.awaiting_anything_else = True
             return "No problem, I've cancelled the booking request. How else can I help you?"
 
         return "Sorry, I didn't catch that. Please say yes to confirm or no to cancel."
@@ -550,6 +555,7 @@ class HospitalHandler:
         if app_id and verify_appointment_booked(app_id):
             booking_id = app_id
             self._reset()
+            self.awaiting_anything_else = True
             return (f"Your appointment is confirmed! "
                     f"Your booking ID is {booking_id}. "
                     "Is there anything else I can help you with?")
@@ -631,6 +637,7 @@ class HospitalHandler:
         self.current_intent = None
         self.confirmation_pending = False
         self.navigation_booking_pending = False
+        self.awaiting_anything_else = False
         self.cancel_appointments = []
 
     @property

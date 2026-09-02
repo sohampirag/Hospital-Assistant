@@ -6,11 +6,17 @@ _global_conn = None
 
 def get_connection():
     global _global_conn
-    if _global_conn is None or _global_conn.closed:
-        url = os.getenv("NEON_DATABASE_URL")
-        if not url:
-            raise ValueError("NEON_DATABASE_URL is missing from .env")
-        _global_conn = psycopg.connect(url, autocommit=True)
+    url = os.getenv("NEON_DATABASE_URL")
+    if not url:
+        raise ValueError("NEON_DATABASE_URL is missing from .env")
+    try:
+        if _global_conn is not None and not _global_conn.closed:
+            _global_conn.execute("SELECT 1")
+            return _global_conn
+    except Exception:
+        _global_conn = None
+ 
+    _global_conn = psycopg.connect(url, autocommit=True)
     return _global_conn
 
 import re

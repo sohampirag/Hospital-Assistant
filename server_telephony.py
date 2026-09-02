@@ -64,6 +64,7 @@ async def main():
 
         stt = CartesiaSTTService(
             api_key=cartesia_api_key,
+            model="Ink-2",
         )
 
         # Note: TTS needs to output 8kHz for PSTN
@@ -82,7 +83,7 @@ async def main():
         turn_manager = TurnManager(
             conversation_id=conversation_id,
             user_id=user_id,
-            timeout=0.18,
+            timeout=0.7,
         )
 
         rtvi = RTVIProcessor()

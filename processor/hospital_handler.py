@@ -26,6 +26,7 @@ from processor.hospital_db import (
     verify_appointment_cancelled,
     get_hospital_address,
 )
+from processor.llm import normalize_phone
 
 # ---------------------------------------------------------------------------
 # Hospital name normalizer – deterministic, no LLM
@@ -35,6 +36,9 @@ _HOSPITAL_ALIASES = {
     "shukla": "Shukla Hospital",
     "sukla": "Shukla Hospital",
     "bombay": "Bombay Hospital Indore",
+    "bomba": "Bombay Hospital Indore",
+    "bombai": "Bombay Hospital Indore",
+    "bambay": "Bombay Hospital Indore",
     "choithram": "Choithram Hospital & Research Centre",
     "chaitram": "Choithram Hospital & Research Centre",
     "chotram": "Choithram Hospital & Research Centre",
@@ -145,24 +149,36 @@ class HospitalHandler:
             self._reset()
             return "Thank you for using Aradhya Hospital Assistant. Have a great day! [END_CALL]"
 
-        self._merge_entities(intent_data)
+        self._merge_entities(intent_data, user_text)
 
         # Fallback for LLM JSON failures or complete misclassifications during data collection
         if self.current_intent in ("book_appointment", "cancel_appointment", "check_appointment"):
             if intent in ("unrelated", "unknown") and not any(intent_data.get(k) for k in ["patient_name", "phone", "address", "hospital_name", "doctor_name", "appointment_date", "appointment_time"]):
                 text_clean = user_text.strip()
                 if text_clean:
-                    if not self.patient_name:
-                        self.patient_name = text_clean
-                        intent = self.current_intent
-                    elif not self.phone:
-                        digits = re.sub(r"\D", "", text_clean)
-                        if len(digits) >= 10:
-                            self.phone = digits
+                    if self.current_intent == "book_appointment":
+                        # Only collect patient details as fallback IF doctor/hospital & date/time are established
+                        if (self.hospital_name or self.doctor_name) and self.appointment_date and self.appointment_time:
+                            if not self.patient_name:
+                                self.patient_name = text_clean
+                                intent = self.current_intent
+                            elif not self.phone:
+                                digits = normalize_phone(text_clean)
+                                if len(digits) >= 10:
+                                    self.phone = digits[:10]
+                                    intent = self.current_intent
+                            elif not self.address:
+                                self.address = text_clean
+                                intent = self.current_intent
+                    elif self.current_intent in ("cancel_appointment", "check_appointment"):
+                        if not self.patient_name:
+                            self.patient_name = text_clean
                             intent = self.current_intent
-                    elif self.current_intent == "book_appointment" and not self.address:
-                        self.address = text_clean
-                        intent = self.current_intent
+                        elif not self.phone:
+                            digits = normalize_phone(text_clean)
+                            if len(digits) >= 10:
+                                self.phone = digits[:10]
+                                intent = self.current_intent
 
         # Robust intent override: if we are in a booking flow and the LLM misclassified a single-entity response
         if self.current_intent in ("book_appointment", "cancel_appointment", "check_appointment"):
@@ -230,7 +246,7 @@ class HospitalHandler:
         return ("I can help with hospital information and appointments. "
                 "What would you like to know?")
 
-    def _merge_entities(self, d: dict):
+    def _merge_entities(self, d: dict, user_text: str = ""):
         extracted_patient = None
         raw_p = d.get("patient_name")
         if raw_p and str(raw_p).lower() not in ("none", "null", ""):
@@ -293,6 +309,10 @@ class HospitalHandler:
         raw_h = d.get("hospital_name")
         if raw_h:
             resolved = _normalize_hospital(raw_h)
+            if resolved:
+                self.hospital_name = resolved
+        if not self.hospital_name and user_text:
+            resolved = _normalize_hospital(user_text)
             if resolved:
                 self.hospital_name = resolved
 
